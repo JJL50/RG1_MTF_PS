@@ -1,0 +1,1082 @@
+//@version=6
+// ============================================================================
+// Pine Script v6 다중 타임 프레임(MTF) 지표 오류 메타 파일
+// 버전: 2.0
+// 최종 업데이트: 2025-01
+// 설명: MTF 매매 신호 지표에서 발생하는 모든 오류 유형과 해결책을 코드화
+// ============================================================================
+
+indicator("MTF Error Meta Reference", overlay=true, max_bars_back=5000)
+
+// ============================================================================
+// 섹션 1: 타임 프레임 동기화 오류 (SYNC ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-SYNC-001] 캔들 정렬 불일치 (Candle Alignment Mismatch)
+// ---------------------------------------------------------------------------
+// 설명: 상위 타임 프레임 캔들이 하위 타임 프레임과 정확히 정렬되지 않음
+// 원인: 타임 프레임 배수 계산 오류, 시장 개장/폐장 시간 미고려
+// 증상: 신호가 잘못된 위치에 표시, 백테스트와 실시간 결과 불일치
+
+// [오류 코드]
+f_SYNC_001_ERROR() =>
+    htf_close_BAD = request.security(syminfo.tickerid, "D", close)  // 정렬 검증 없음
+    htf_close_BAD
+
+// [해결책]
+f_SYNC_001_FIX() =>
+    // 타임 프레임 정렬 검증 추가
+    htf = "D"
+    htf_seconds = timeframe.in_seconds(htf)
+    current_seconds = timeframe.in_seconds(timeframe.period)
+    
+    // 타임 프레임 비율 검증
+    is_valid_ratio = htf_seconds >= current_seconds
+    
+    // 정렬된 데이터만 요청
+    htf_close_GOOD = is_valid_ratio ? request.security(syminfo.tickerid, htf, close[1], lookahead=barmerge.lookahead_on) : na
+    htf_close_GOOD
+
+// ---------------------------------------------------------------------------
+// [MTF-SYNC-002] 타임존 불일치 (Timezone Discrepancy)
+// ---------------------------------------------------------------------------
+// 설명: 서버 시간과 로컬 시간의 타임존 차이로 인한 캔들 오프셋
+// 원인: UTC 변환 누락, 서머타임(DST) 미적용
+// 증상: 특정 시간대에서만 신호 오류 발생
+
+// [오류 코드]
+f_SYNC_002_ERROR() =>
+    // 타임존 미고려
+    session_check = time(timeframe.period, "0930-1600")  // 타임존 지정 안함
+    session_check
+
+// [해결책]
+f_SYNC_002_FIX() =>
+    // 명시적 타임존 지정
+    session_check = time(timeframe.period, "0930-1600:1234567", "America/New_York")
+    session_check
+
+// ---------------------------------------------------------------------------
+// [MTF-SYNC-003] 비동기 데이터 로딩 (Asynchronous Data Loading)
+// ---------------------------------------------------------------------------
+// 설명: 상위 타임 프레임 데이터가 하위보다 늦게 로드됨
+// 원인: API 호출 지연, 네트워크 레이턴시
+// 증상: 초기 로딩 시 잘못된 신호, NULL 값 참조
+
+// [오류 코드]
+f_SYNC_003_ERROR() =>
+    htf_data = request.security(syminfo.tickerid, "60", close)
+    signal = htf_data > htf_data[1]  // na 검증 없음
+    signal
+
+// [해결책]
+f_SYNC_003_FIX() =>
+    htf_data = request.security(syminfo.tickerid, "60", close[1], lookahead=barmerge.lookahead_on)
+    // 데이터 유효성 검증
+    is_data_ready = not na(htf_data) and bar_index > 50
+    signal = is_data_ready and htf_data > nz(htf_data[1], htf_data)
+    signal
+
+// ---------------------------------------------------------------------------
+// [MTF-SYNC-004] 타임 프레임 비율 불균형 (Timeframe Ratio Imbalance)
+// ---------------------------------------------------------------------------
+// 설명: 부적절한 타임 프레임 조합으로 인한 분석 왜곡
+// 원인: 권장 비율(4:1 ~ 6:1) 미준수
+// 증상: 신호 민감도 불균형, 과도한 노이즈 또는 지연
+
+// [오류 코드] - 1분봉에서 일봉 직접 비교 (1440:1 비율)
+f_SYNC_004_ERROR() =>
+    daily_ma = request.security(syminfo.tickerid, "D", ta.sma(close, 20))
+    signal = close > daily_ma  // 극단적 비율
+    signal
+
+// [해결책] - 단계적 타임 프레임 체인 사용
+f_SYNC_004_FIX() =>
+    // 1분 -> 5분 -> 15분 -> 1시간 -> 4시간 -> 일봉 (각 4~6배)
+    tf_5m = request.security(syminfo.tickerid, "5", ta.sma(close[1], 20), lookahead=barmerge.lookahead_on)
+    tf_15m = request.security(syminfo.tickerid, "15", ta.sma(close[1], 20), lookahead=barmerge.lookahead_on)
+    tf_1h = request.security(syminfo.tickerid, "60", ta.sma(close[1], 20), lookahead=barmerge.lookahead_on)
+    [tf_5m, tf_15m, tf_1h]
+
+
+// ============================================================================
+// 섹션 2: 리페인팅 오류 (REPAINT ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-REPAINT-001] 미확정 캔들 참조 (Unconfirmed Candle Reference)
+// ---------------------------------------------------------------------------
+// 설명: 완성되지 않은 상위 타임 프레임 캔들 데이터 사용
+// 원인: barstate.isconfirmed 검증 누락
+// 증상: 실시간에서 신호가 나타났다 사라짐, 백테스트 과최적화
+
+// [오류 코드 - 리페인팅 발생]
+f_REPAINT_001_ERROR() =>
+    htf_close = request.security(syminfo.tickerid, "D", close)  // 현재 바 직접 참조
+    htf_close
+
+// [해결책 1 - lookahead_on + 오프셋 조합] ★★★ 권장 ★★★
+f_REPAINT_001_FIX_V1() =>
+    // close[1]로 이전 바 참조 + lookahead_on으로 해당 바의 마지막 값 사용
+    htf_close = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+    htf_close
+
+// [해결책 2 - lookahead_off 사용]
+f_REPAINT_001_FIX_V2() =>
+    // lookahead_off는 현재 차트 바 시점의 HTF 값 반환 (리페인팅 가능성 있음)
+    htf_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+    htf_close
+
+// [해결책 3 - barstate.isconfirmed 활용]
+f_REPAINT_001_FIX_V3() =>
+    htf_close = request.security(syminfo.tickerid, "D", close)
+    // 확정된 바에서만 신호 생성
+    confirmed_signal = barstate.isconfirmed ? htf_close : na
+    confirmed_signal
+
+// ---------------------------------------------------------------------------
+// [MTF-REPAINT-002] Lookahead 바이어스 (Lookahead Bias)
+// ---------------------------------------------------------------------------
+// 설명: 미래 데이터를 현재 시점에서 참조하여 가짜 성과 생성
+// 원인: lookahead 파라미터 오용
+// 증상: 백테스트에서 비현실적 수익률, 실거래 시 성과 급락
+
+// [오류 코드 - 미래 데이터 누출]
+f_REPAINT_002_ERROR() =>
+    // lookahead_on만 사용하고 오프셋 없음 = 미래 데이터 참조!
+    htf_close = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_on)
+    htf_close  // 역사적 바에서 미래 가격 표시
+
+// [해결책]
+f_REPAINT_002_FIX() =>
+    // 반드시 [1] 오프셋과 함께 lookahead_on 사용
+    htf_close = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+    htf_close
+
+// ---------------------------------------------------------------------------
+// [MTF-REPAINT-003] 갭 처리 오류 (Gap Handling Error)
+// ---------------------------------------------------------------------------
+// 설명: 상위 타임 프레임 데이터의 갭 처리 방식 오류
+// 원인: barmerge.gaps_on/off 파라미터 부적절한 설정
+// 증상: na 값 전파, 지표 라인 끊김
+
+// [오류 코드]
+f_REPAINT_003_ERROR() =>
+    // gaps_on 사용 시 HTF 바가 없는 구간에서 na 반환
+    htf_close = request.security(syminfo.tickerid, "D", close[1], gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_on)
+    signal = htf_close > htf_close[1]  // na 전파
+    signal
+
+// [해결책]
+f_REPAINT_003_FIX() =>
+    // gaps_off (기본값) 사용하여 이전 유효값 유지
+    htf_close = request.security(syminfo.tickerid, "D", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+    // 추가 안전장치
+    htf_close_safe = nz(htf_close, close)
+    htf_close_safe
+
+
+// ============================================================================
+// 섹션 3: v6 타입 시스템 오류 (TYPE ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-TYPE-001] int/float → bool 암시적 변환 제거
+// ---------------------------------------------------------------------------
+// 설명: v6에서 int/float 값이 더 이상 bool로 자동 변환되지 않음
+// 원인: v5에서 0은 false, 다른 값은 true로 암시적 변환됨
+// 증상: 컴파일 오류 또는 예상과 다른 논리 동작
+
+// [오류 코드 - v5에서는 작동, v6에서 오류]
+// color expr = bar_index ? color.red : color.green  // 오류!
+
+// [해결책]
+f_TYPE_001_FIX() =>
+    // 명시적으로 bool 변환
+    expr = bool(bar_index) ? color.red : color.green
+    // 또는 명시적 비교
+    expr2 = bar_index != 0 ? color.red : color.green
+    [expr, expr2]
+
+// ---------------------------------------------------------------------------
+// [MTF-TYPE-002] bool 타입에 na 불가
+// ---------------------------------------------------------------------------
+// 설명: v6에서 bool 값은 절대 na가 될 수 없음 (true 또는 false만)
+// 원인: v5에서는 bool이 na일 수 있었음
+// 증상: na(), nz(), fixnan()에 bool 인자 사용 시 오류
+
+// [오류 코드 - v6에서 오류]
+// bool myBool = na  // 오류!
+// result = na(myBool)  // 오류!
+
+// [해결책]
+f_TYPE_002_FIX() =>
+    // bool은 반드시 true 또는 false로 초기화
+    bool myBool = false
+    
+    // bool 조건부 로직은 명시적으로 처리
+    var bool isLong = false
+    if strategy.position_size > 0
+        isLong := true
+    else if strategy.position_size < 0
+        isLong := false
+    // position_size == 0일 때는 이전 값 유지
+    isLong
+
+// ---------------------------------------------------------------------------
+// [MTF-TYPE-003] series vs simple 타입 불일치
+// ---------------------------------------------------------------------------
+// 설명: 함수가 simple 타입을 요구하는데 series 타입 전달
+// 원인: 동적 값을 상수가 필요한 파라미터에 전달
+// 증상: "An argument of 'series' type was used but 'simple' is expected"
+
+// [오류 코드]
+// length = close > open ? 14 : 20  // series int
+// rsi = ta.rsi(close, length)  // 오류! length는 simple int 필요
+
+// [해결책]
+f_TYPE_003_FIX() =>
+    // 방법 1: input 사용
+    length = input.int(14, "RSI Length")
+    rsi1 = ta.rsi(close, length)
+    
+    // 방법 2: 조건부로 다른 계산 수행
+    rsi_14 = ta.rsi(close, 14)
+    rsi_20 = ta.rsi(close, 20)
+    rsi2 = close > open ? rsi_14 : rsi_20
+    
+    [rsi1, rsi2]
+
+// ---------------------------------------------------------------------------
+// [MTF-TYPE-004] const vs input vs simple 타입 제한
+// ---------------------------------------------------------------------------
+// 설명: hline, 알림 메시지 등 const string 필요한 곳에 series 사용
+// 원인: 동적 문자열을 상수 위치에 사용
+// 증상: "An argument of 'series string' was used but 'const string' is expected"
+
+// [오류 코드]
+// msg = "Price: " + str.tostring(close)
+// alertcondition(condition, message=msg)  // 오류! message는 const 필요
+
+// [해결책]
+f_TYPE_004_FIX() =>
+    // alertcondition의 message는 플레이스홀더 사용
+    // alertcondition(true, message="Price: {{close}}")
+    
+    // 동적 메시지는 alert() 함수 사용
+    if barstate.isconfirmed and close > open
+        alert("Price: " + str.tostring(close), alert.freq_once_per_bar)
+    true
+
+
+// ============================================================================
+// 섹션 4: v6 동적 요청 오류 (DYNAMIC REQUEST ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-DYN-001] 동적 요청 기본값 변경
+// ---------------------------------------------------------------------------
+// 설명: v6에서 dynamic_requests가 기본적으로 true
+// 원인: v5에서 v6로 변환 시 동작 차이 발생 가능
+// 증상: 기존 스크립트 동작 변경, 예기치 않은 결과
+
+// [v5 동작 재현이 필요한 경우]
+// indicator("My Script", dynamic_requests=false)
+
+// [v6 동적 요청 활용]
+f_DYN_001_EXAMPLE() =>
+    // v6에서는 루프 내 request.security() 사용 가능
+    symbols = array.from("AAPL", "MSFT", "GOOGL")
+    var prices = array.new_float(3)
+    
+    for i = 0 to array.size(symbols) - 1
+        sym = array.get(symbols, i)
+        price = request.security(sym, "D", close[1], lookahead=barmerge.lookahead_on)
+        array.set(prices, i, price)
+    
+    prices
+
+// ---------------------------------------------------------------------------
+// [MTF-DYN-002] 조건부 블록 내 request.security() 오해
+// ---------------------------------------------------------------------------
+// 설명: 조건부 블록 내 request.security()가 조건과 무관하게 항상 실행됨
+// 원인: request.security()는 메인 스크립트 실행 전에 데이터 요청
+// 증상: 성능 최적화 기대 실패, 프로파일러에서 모든 바 실행 표시
+
+// [오류 코드 - 조건부 최적화 기대]
+f_DYN_002_ERROR() =>
+    out = 0.0
+    if bar_index % 100 == 0  // 100바마다만 실행 기대
+        out := request.security(syminfo.tickerid, "15", close)  // 실제로는 항상 실행!
+    out
+
+// [해결책 - 결과값만 조건부로 사용]
+f_DYN_002_FIX() =>
+    // request.security()는 항상 호출됨을 인지
+    htf_close = request.security(syminfo.tickerid, "15", close[1], lookahead=barmerge.lookahead_on)
+    // 결과 사용만 조건부로
+    out = bar_index % 100 == 0 ? htf_close : na
+    out
+
+// ---------------------------------------------------------------------------
+// [MTF-DYN-003] request.security() 호출 제한 (40개)
+// ---------------------------------------------------------------------------
+// 설명: 스크립트당 최대 40개의 고유 request.security() 호출 가능
+// 원인: 서버 리소스 보호를 위한 제한
+// 증상: "Script requests too many securities" 오류
+
+// [오류 코드]
+f_DYN_003_ERROR() =>
+    sum = 0.0
+    // 40개 초과 시 런타임 오류
+    for i = 1 to 50
+        sum += request.security(syminfo.tickerid, str.tostring(i), close)
+    sum  // i=41에서 오류 발생
+
+// [해결책]
+f_DYN_003_FIX() =>
+    // 1. 요청 수 최소화
+    // 2. 여러 값을 튜플로 한 번에 요청
+    [htf_o, htf_h, htf_l, htf_c] = request.security(syminfo.tickerid, "D", [open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+    
+    // 3. 계산을 expression 내부에서 수행
+    htf_ema = request.security(syminfo.tickerid, "D", ta.ema(close, 20)[1], lookahead=barmerge.lookahead_on)
+    
+    [htf_o, htf_h, htf_l, htf_c, htf_ema]
+
+
+// ============================================================================
+// 섹션 5: 계산 로직 오류 (CALCULATION ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-CALC-001] 정수 나눗셈 동작 변경
+// ---------------------------------------------------------------------------
+// 설명: v6에서 const int 나눗셈이 소수점 결과 반환
+// 원인: v5까지는 int/int = int, v6에서는 int/int = float
+// 증상: 인덱스 계산 등에서 예상과 다른 결과
+
+// [v5 동작]
+// result = 5 / 2  // = 2 (정수)
+
+// [v6 동작 및 해결책]
+f_CALC_001_FIX() =>
+    // v6에서는 소수점 결과
+    result_float = 5 / 2  // = 2.5
+    
+    // 정수 결과가 필요하면 명시적 변환
+    result_int = int(5 / 2)  // = 2
+    // 또는
+    result_floor = math.floor(5 / 2)  // = 2
+    
+    [result_float, result_int, result_floor]
+
+// ---------------------------------------------------------------------------
+// [MTF-CALC-002] NaN/na 전파 오류
+// ---------------------------------------------------------------------------
+// 설명: 상위 타임 프레임의 초기 na 값이 계산에 전파
+// 원인: 충분한 히스토리 데이터 부재, 초기화 검증 누락
+// 증상: 차트 초반부 신호 누락, 계산 오류
+
+// [오류 코드]
+f_CALC_002_ERROR() =>
+    htf_rsi = request.security(syminfo.tickerid, "240", ta.rsi(close, 14))
+    signal = htf_rsi > 70  // na면 false 반환 (v6)
+    signal
+
+// [해결책]
+f_CALC_002_FIX() =>
+    htf_rsi = request.security(syminfo.tickerid, "240", ta.rsi(close, 14)[1], lookahead=barmerge.lookahead_on)
+    
+    // na 검증 및 기본값 적용
+    htf_rsi_safe = nz(htf_rsi, 50)
+    
+    // 데이터 유효성 확인 후 신호 생성
+    is_valid = not na(htf_rsi) and bar_index > 100
+    signal = is_valid and htf_rsi > 70
+    
+    [htf_rsi_safe, signal]
+
+// ---------------------------------------------------------------------------
+// [MTF-CALC-003] 0으로 나누기 오류
+// ---------------------------------------------------------------------------
+// 설명: 변동성 지표에서 ATR=0 등의 상황에서 발생
+// 원인: 거래량=0, ATR=0, 범위=0 등
+// 증상: 런타임 오류, 무한대 값
+
+// [오류 코드]
+f_CALC_003_ERROR() =>
+    atr = ta.atr(14)
+    normalized = close / atr  // atr이 0이면 오류!
+    normalized
+
+// [해결책]
+f_CALC_003_FIX() =>
+    atr = ta.atr(14)
+    // 0 방지
+    atr_safe = math.max(atr, syminfo.mintick)
+    normalized = close / atr_safe
+    normalized
+
+// ---------------------------------------------------------------------------
+// [MTF-CALC-004] max_bars_back 오류
+// ---------------------------------------------------------------------------
+// 설명: 히스토리 버퍼 크기 초과로 인한 참조 오류
+// 원인: 동적 인덱스로 과거 데이터 참조, 버퍼 크기 부족
+// 증상: "Pine cannot determine the referencing length" 오류
+
+// [오류 코드]
+f_CALC_004_ERROR() =>
+    dynamic_offset = int(ta.sma(bar_index % 100, 10))
+    value = close[dynamic_offset]  // 동적 오프셋으로 오류 가능
+    value
+
+// [해결책]
+f_CALC_004_FIX() =>
+    // 방법 1: indicator/strategy에서 max_bars_back 설정
+    // indicator("My Script", max_bars_back=5000)
+    
+    // 방법 2: 특정 변수에만 max_bars_back 적용
+    var float my_var = na
+    my_var := close
+    max_bars_back(my_var, 500)
+    
+    // 방법 3: 동적 오프셋 범위 제한
+    dynamic_offset = math.min(int(ta.sma(bar_index % 100, 10)), 500)
+    value = close[dynamic_offset]
+    value
+
+
+// ============================================================================
+// 섹션 6: 신호 생성 오류 (SIGNAL ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-SIG-001] 신호 충돌 (Signal Conflict)
+// ---------------------------------------------------------------------------
+// 설명: 서로 다른 타임 프레임에서 상반된 신호 동시 발생
+// 원인: 우선순위 로직 부재, 신호 합성 규칙 미정의
+// 증상: 매수/매도 신호 동시 출력, 사용자 혼란
+
+// [오류 코드]
+f_SIG_001_ERROR() =>
+    ltf_signal = ta.crossover(ta.sma(close, 10), ta.sma(close, 20)) ? 1 : ta.crossunder(ta.sma(close, 10), ta.sma(close, 20)) ? -1 : 0
+    htf_ma = request.security(syminfo.tickerid, "D", ta.sma(close, 50)[1], lookahead=barmerge.lookahead_on)
+    htf_signal = close > htf_ma ? 1 : -1
+    // 충돌 처리 없음
+    [ltf_signal, htf_signal]
+
+// [해결책 - 우선순위 기반 신호 합성]
+f_SIG_001_FIX() =>
+    // 각 타임 프레임 신호 계산
+    ltf_bull = ta.crossover(ta.sma(close, 10), ta.sma(close, 20))
+    ltf_bear = ta.crossunder(ta.sma(close, 10), ta.sma(close, 20))
+    
+    htf_ma = request.security(syminfo.tickerid, "D", ta.sma(close, 50)[1], lookahead=barmerge.lookahead_on)
+    htf_bull = close > htf_ma
+    htf_bear = close < htf_ma
+    
+    // 우선순위: 상위 TF가 방향 결정, 하위 TF가 타이밍 결정
+    final_signal = htf_bull and ltf_bull ? 2 :   // 강한 매수
+                   htf_bull and not ltf_bear ? 1 : // 매수
+                   htf_bear and ltf_bear ? -2 :   // 강한 매도
+                   htf_bear and not ltf_bull ? -1 : // 매도
+                   0                               // 중립
+    final_signal
+
+// ---------------------------------------------------------------------------
+// [MTF-SIG-002] 중복 신호 발생 (Duplicate Signal)
+// ---------------------------------------------------------------------------
+// 설명: 동일 조건에서 여러 캔들에 걸쳐 신호 반복
+// 원인: 상태 변화 대신 조건 충족만 확인, 상위 TF 값 반복
+// 증상: 연속적인 동일 신호, 알림 폭주
+
+// [오류 코드]
+f_SIG_002_ERROR() =>
+    htf_rsi = request.security(syminfo.tickerid, "60", ta.rsi(close, 14)[1], lookahead=barmerge.lookahead_on)
+    buy_signal = htf_rsi < 30  // 조건이 계속 true면 매 바마다 신호
+    buy_signal
+
+// [해결책]
+f_SIG_002_FIX() =>
+    htf_rsi = request.security(syminfo.tickerid, "60", ta.rsi(close, 14)[1], lookahead=barmerge.lookahead_on)
+    
+    // 방법 1: 상태 변화 감지 (crossover/crossunder 활용)
+    buy_signal_v1 = ta.crossunder(htf_rsi, 30)  // 30 아래로 크로스할 때만
+    
+    // 방법 2: 상태 플래그 관리
+    var bool signal_fired = false
+    if htf_rsi < 30 and not signal_fired
+        signal_fired := true
+    if htf_rsi > 35  // 리셋 조건
+        signal_fired := false
+    
+    buy_signal_v2 = htf_rsi < 30 and not signal_fired[1] and signal_fired
+    
+    [buy_signal_v1, buy_signal_v2]
+
+// ---------------------------------------------------------------------------
+// [MTF-SIG-003] 신호 지연 (Signal Latency)
+// ---------------------------------------------------------------------------
+// 설명: 상위 타임 프레임 신호가 하위에서 늦게 반영됨
+// 원인: 상위 TF 캔들 완성 대기 필요
+// 증상: 진입/청산 타이밍 지연, 슬리피지 증가
+
+// [오류 코드 - 지연 인식 부재]
+f_SIG_003_ERROR() =>
+    htf_signal = request.security(syminfo.tickerid, "240", ta.crossover(ta.ema(close, 12), ta.ema(close, 26))[1], lookahead=barmerge.lookahead_on)
+    // 4시간봉 크로스오버가 발생해도 최대 4시간 후에야 확정
+    htf_signal
+
+// [해결책 - 예상 신호 + 확정 신호 구분]
+f_SIG_003_FIX() =>
+    // 확정 신호 (리페인팅 없음, 지연 있음)
+    htf_confirmed = request.security(syminfo.tickerid, "240", ta.crossover(ta.ema(close, 12), ta.ema(close, 26))[1], lookahead=barmerge.lookahead_on)
+    
+    // 예상 신호 (리페인팅 가능, 실시간 반응)
+    htf_preview = request.security(syminfo.tickerid, "240", ta.crossover(ta.ema(close, 12), ta.ema(close, 26)), lookahead=barmerge.lookahead_off)
+    
+    // 현재 HTF 바 진행률 계산
+    htf_seconds = timeframe.in_seconds("240")
+    current_seconds = timeframe.in_seconds(timeframe.period)
+    bars_in_htf = htf_seconds / current_seconds
+    htf_progress = (bar_index % bars_in_htf) / bars_in_htf * 100
+    
+    [htf_confirmed, htf_preview, htf_progress]
+
+// ---------------------------------------------------------------------------
+// [MTF-SIG-004] 경계 조건 오류 (Boundary Condition Error)
+// ---------------------------------------------------------------------------
+// 설명: 지표 값이 정확히 임계값에 위치할 때 처리 오류
+// 원인: > vs >= 연산자 혼용, 부동소수점 비교 오류
+// 증상: 간헐적 신호 누락 또는 추가
+
+// [오류 코드]
+f_SIG_004_ERROR() =>
+    rsi = ta.rsi(close, 14)
+    // 정확히 70일 때 불분명한 처리
+    overbought = rsi > 70
+    overbought
+
+// [해결책]
+f_SIG_004_FIX() =>
+    rsi = ta.rsi(close, 14)
+    
+    // 명확한 경계 정의
+    OVERBOUGHT_ENTER = 70.0
+    OVERBOUGHT_EXIT = 65.0
+    
+    // 히스테리시스 적용으로 경계 진동 방지
+    var bool is_overbought = false
+    if rsi >= OVERBOUGHT_ENTER
+        is_overbought := true
+    if rsi <= OVERBOUGHT_EXIT
+        is_overbought := false
+    
+    // 부동소수점 비교 시 허용오차 적용
+    tolerance = 0.0001
+    exact_match = math.abs(rsi - 70) < tolerance
+    
+    [is_overbought, exact_match]
+
+// ---------------------------------------------------------------------------
+// [MTF-SIG-005] 바 상태 기반 신호 불일치 (Bar State Signal Mismatch)
+// ---------------------------------------------------------------------------
+// 설명: 바 상태(isrealtime, isconfirmed 등)에 따른 신호 불일치
+// 원인: 실시간과 히스토리컬에서 다른 조건 적용
+// 증상: 실시간과 히스토리컬 신호 타이밍 불일치
+
+// [오류 코드]
+f_SIG_005_ERROR() =>
+    // barstate 조건이 히스토리컬에서는 다르게 동작
+    signal = barstate.isrealtime and close > open
+    signal  // 히스토리컬 바에서는 항상 false
+
+// [해결책]
+f_SIG_005_FIX() =>
+    // 바 상태와 무관한 일관된 로직
+    base_condition = close > open
+    
+    // 실시간에서만 추가 필터 적용 (필요시)
+    signal = base_condition and (barstate.ishistory or barstate.isconfirmed)
+    
+    signal
+
+
+// ============================================================================
+// 섹션 7: 알림/알람 시스템 오류 (ALERT ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-ALERT-001] alertcondition vs alert 혼동
+// ---------------------------------------------------------------------------
+// 설명: alertcondition과 alert 함수의 동작 차이 이해 부족
+// 원인: alertcondition은 차트에서 설정 필요, alert는 자동 실행
+// 증상: 알림 미수신, 설정 후에도 작동 안함
+
+// [alertcondition 사용법]
+f_ALERT_001_ALERTCOND() =>
+    buy_signal = ta.crossover(ta.sma(close, 10), ta.sma(close, 20))
+    // alertcondition: 차트에서 수동으로 알림 생성 필요
+    // message는 const string만 가능 (동적 값은 플레이스홀더 사용)
+    alertcondition(buy_signal, title="Buy Signal", message="Buy at {{close}}")
+    buy_signal
+
+// [alert 사용법]
+f_ALERT_001_ALERT() =>
+    buy_signal = ta.crossover(ta.sma(close, 10), ta.sma(close, 20))
+    // alert: 조건 충족 시 자동 실행, 동적 메시지 가능
+    if buy_signal and barstate.isconfirmed
+        alert("Buy Signal at " + str.tostring(close), alert.freq_once_per_bar)
+    buy_signal
+
+// ---------------------------------------------------------------------------
+// [MTF-ALERT-002] 알림 중복 발생 (Duplicate Alerts)
+// ---------------------------------------------------------------------------
+// 설명: 동일 신호에 대해 알림이 여러 번 발생
+// 원인: alert.freq 설정 오류, 바 내 틱 업데이트마다 실행
+// 증상: 알림 폭주, 스팸
+
+// [오류 코드]
+f_ALERT_002_ERROR() =>
+    condition = close > ta.sma(close, 20)
+    if condition
+        alert("Above MA!")  // 기본값: 매 틱마다 알림!
+    condition
+
+// [해결책]
+f_ALERT_002_FIX() =>
+    condition = close > ta.sma(close, 20)
+    condition_first = ta.crossover(close, ta.sma(close, 20))  // 첫 크로스만
+    
+    // 빈도 옵션:
+    // alert.freq_all - 매 호출마다 (기본값, 주의!)
+    // alert.freq_once_per_bar - 바당 1회
+    // alert.freq_once_per_bar_close - 바 종가 확정 시 1회
+    
+    if condition_first
+        alert("Crossed above MA!", alert.freq_once_per_bar_close)
+    
+    // 또는 barstate 활용
+    if condition and barstate.isconfirmed
+        alert("Above MA (confirmed)", alert.freq_once_per_bar)
+    
+    condition_first
+
+// ---------------------------------------------------------------------------
+// [MTF-ALERT-003] MTF 알림 타이밍 오류
+// ---------------------------------------------------------------------------
+// 설명: 상위 타임 프레임 신호 알림이 잘못된 시점에 발생
+// 원인: HTF 데이터 업데이트 타이밍과 알림 발생 시점 불일치
+// 증상: 늦은 알림, 조기 알림, 거짓 알림
+
+// [오류 코드]
+f_ALERT_003_ERROR() =>
+    htf_signal = request.security(syminfo.tickerid, "D", ta.crossover(ta.sma(close, 10), ta.sma(close, 50)))
+    if htf_signal
+        alert("Daily Golden Cross!")  // 일봉 완성 전에 알림 발생 가능
+    htf_signal
+
+// [해결책]
+f_ALERT_003_FIX() =>
+    // 확정된 HTF 신호만 사용
+    htf_signal = request.security(syminfo.tickerid, "D", ta.crossover(ta.sma(close, 10), ta.sma(close, 50))[1], lookahead=barmerge.lookahead_on)
+    
+    // 신호 변화 감지 (HTF 신호는 여러 LTF 바에서 동일)
+    htf_signal_new = htf_signal and not htf_signal[1]
+    
+    if htf_signal_new and barstate.isconfirmed
+        alert("Daily Golden Cross (Confirmed)!", alert.freq_once_per_bar)
+    
+    htf_signal_new
+
+
+// ============================================================================
+// 섹션 8: 전략 백테스팅 오류 (STRATEGY ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-STRAT-001] 비현실적 체결가 (Unrealistic Fill Price)
+// ---------------------------------------------------------------------------
+// 설명: 백테스트에서 실제로 불가능한 가격에 체결
+// 원인: 기본 체결 모드가 시가/종가, 슬리피지 미적용
+// 증상: 과대 수익률, 실거래와 큰 괴리
+
+// [오류 설정]
+// strategy("Bad Strategy", fill_orders_on_standard_ohlc=true)  // 비현실적
+
+// [해결책]
+// strategy("Good Strategy", 
+//     fill_orders_on_standard_ohlc=false,  // 바 내 가격 사용
+//     slippage=2,                           // 슬리피지 2틱
+//     commission_type=strategy.commission.percent,
+//     commission_value=0.1,                 // 0.1% 수수료
+//     use_bar_magnifier=true                // 더 정밀한 시뮬레이션
+// )
+
+// ---------------------------------------------------------------------------
+// [MTF-STRAT-002] 진입가 미지정 오류
+// ---------------------------------------------------------------------------
+// 설명: 주문 시 가격 미지정으로 예상과 다른 체결
+// 원인: strategy.entry()의 기본 동작 이해 부족
+// 증상: 의도치 않은 진입가
+
+// [오류 코드]
+f_STRAT_002_ERROR() =>
+    if ta.crossover(ta.sma(close, 10), ta.sma(close, 20))
+        strategy.entry("Long", strategy.long)  // 시장가 진입
+    true
+
+// [해결책]
+f_STRAT_002_FIX() =>
+    fast_ma = ta.sma(close, 10)
+    slow_ma = ta.sma(close, 20)
+    
+    if ta.crossover(fast_ma, slow_ma)
+        // 지정가 주문
+        strategy.entry("Long", strategy.long, limit=close)
+        
+        // 또는 스탑 주문
+        // strategy.entry("Long", strategy.long, stop=high)
+    true
+
+// ---------------------------------------------------------------------------
+// [MTF-STRAT-003] MTF 전략 리페인팅
+// ---------------------------------------------------------------------------
+// 설명: MTF 조건을 사용한 전략에서 백테스트와 실거래 결과 불일치
+// 원인: 리페인팅 HTF 데이터로 전략 신호 생성
+// 증상: 완벽한 백테스트 + 실패하는 실거래
+
+// [오류 코드]
+f_STRAT_003_ERROR() =>
+    htf_trend = request.security(syminfo.tickerid, "D", close > ta.sma(close, 50))  // 리페인팅!
+    if htf_trend and ta.crossover(close, ta.sma(close, 10))
+        strategy.entry("Long", strategy.long)
+    true
+
+// [해결책]
+f_STRAT_003_FIX() =>
+    // 확정된 HTF 데이터만 사용
+    htf_trend = request.security(syminfo.tickerid, "D", (close > ta.sma(close, 50))[1], lookahead=barmerge.lookahead_on)
+    
+    if htf_trend and ta.crossover(close, ta.sma(close, 10)) and barstate.isconfirmed
+        strategy.entry("Long", strategy.long)
+    true
+
+// ---------------------------------------------------------------------------
+// [MTF-STRAT-004] calc_on_every_tick 설정 오류
+// ---------------------------------------------------------------------------
+// 설명: 틱마다 계산 vs 바 종가에만 계산의 차이
+// 원인: 기본값(false)과 실제 필요 동작 불일치
+// 증상: 실시간에서 예상과 다른 진입/청산
+
+// [설정 가이드]
+// calc_on_every_tick=false (기본값): 바 종가에만 실행, 더 안정적
+// calc_on_every_tick=true: 매 틱마다 실행, 더 즉각적이지만 리페인팅 위험
+
+// strategy("My Strategy", calc_on_every_tick=false, process_orders_on_close=true)
+
+
+// ============================================================================
+// 섹션 9: 메모리 및 성능 오류 (PERFORMANCE ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-PERF-001] 과도한 request.security() 호출
+// ---------------------------------------------------------------------------
+// 설명: 너무 많은 MTF 데이터 요청으로 성능 저하
+// 원인: 비효율적 구조, 중복 요청
+// 증상: 차트 로딩 지연, "Script takes too long" 오류
+
+// [오류 코드]
+f_PERF_001_ERROR() =>
+    // 비효율적: 같은 TF에 여러 번 요청
+    htf_open = request.security(syminfo.tickerid, "D", open[1], lookahead=barmerge.lookahead_on)
+    htf_high = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+    htf_low = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+    htf_close = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+    [htf_open, htf_high, htf_low, htf_close]
+
+// [해결책 - 튜플로 한 번에 요청]
+f_PERF_001_FIX() =>
+    // 효율적: 한 번의 요청으로 여러 값
+    [htf_o, htf_h, htf_l, htf_c] = request.security(syminfo.tickerid, "D", [open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+    
+    // 계산도 expression 내부에서
+    [htf_ema, htf_rsi] = request.security(syminfo.tickerid, "D", [ta.ema(close, 20)[1], ta.rsi(close, 14)[1]], lookahead=barmerge.lookahead_on)
+    
+    [htf_o, htf_h, htf_l, htf_c, htf_ema, htf_rsi]
+
+// ---------------------------------------------------------------------------
+// [MTF-PERF-002] 배열 크기 제한 (100,000 요소)
+// ---------------------------------------------------------------------------
+// 설명: Pine Script 배열 최대 크기 초과
+// 원인: 과도한 데이터 저장, 무한 성장 배열
+// 증상: "Array is too large" 런타임 오류
+
+// [오류 코드]
+f_PERF_002_ERROR() =>
+    var prices = array.new_float()
+    array.push(prices, close)  // 무한 성장!
+    array.size(prices)
+
+// [해결책]
+f_PERF_002_FIX() =>
+    MAX_SIZE = 1000
+    var prices = array.new_float()
+    
+    array.push(prices, close)
+    
+    // 크기 제한 유지
+    if array.size(prices) > MAX_SIZE
+        array.shift(prices)  // 가장 오래된 요소 제거
+    
+    array.size(prices)
+
+// ---------------------------------------------------------------------------
+// [MTF-PERF-003] 루프 최적화 오류
+// ---------------------------------------------------------------------------
+// 설명: 비효율적인 루프로 인한 성능 저하
+// 원인: 불필요한 반복, 중복 계산
+// 증상: 스크립트 실행 시간 초과
+
+// [오류 코드]
+f_PERF_003_ERROR() =>
+    sum = 0.0
+    for i = 0 to 499
+        sum += close[i]  // 매 바마다 500번 반복
+    sum / 500
+
+// [해결책]
+f_PERF_003_FIX() =>
+    // 내장 함수 활용
+    avg = ta.sma(close, 500)
+    
+    // 또는 증분 계산
+    var float running_sum = 0.0
+    running_sum := running_sum + close - nz(close[500])
+    avg2 = running_sum / math.min(bar_index + 1, 500)
+    
+    [avg, avg2]
+
+
+// ============================================================================
+// 섹션 10: 시각화 오류 (VISUALIZATION ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-VIS-001] 플롯 제한 (64개)
+// ---------------------------------------------------------------------------
+// 설명: 스크립트당 최대 64개의 plot 가능
+// 원인: 과도한 시각화 요소
+// 증상: 컴파일 오류
+
+// [해결책]
+f_VIS_001_FIX() =>
+    // plot 수 최소화
+    // fill(), bgcolor() 등은 제한에 포함되지 않음
+    // 조건부 색상으로 여러 정보를 하나의 plot에 표시
+    ema = ta.ema(close, 20)
+    plot(ema, color=close > ema ? color.green : color.red)
+    ema
+
+// ---------------------------------------------------------------------------
+// [MTF-VIS-002] label/line 객체 제한 (500개)
+// ---------------------------------------------------------------------------
+// 설명: 차트에 동시에 표시 가능한 객체 수 제한
+// 원인: 객체 삭제 없이 계속 생성
+// 증상: 오래된 객체 자동 삭제, 예상과 다른 표시
+
+// [오류 코드]
+f_VIS_002_ERROR() =>
+    if ta.crossover(ta.sma(close, 10), ta.sma(close, 20))
+        label.new(bar_index, high, "Buy")  // 계속 생성, 500개 초과 시 오래된 것 삭제
+    true
+
+// [해결책]
+f_VIS_002_FIX() =>
+    var label buy_label = na
+    
+    if ta.crossover(ta.sma(close, 10), ta.sma(close, 20))
+        // 기존 라벨 삭제 후 새로 생성
+        label.delete(buy_label)
+        buy_label := label.new(bar_index, high, "Buy", color=color.green)
+    true
+
+// ---------------------------------------------------------------------------
+// [MTF-VIS-003] table 업데이트 오류
+// ---------------------------------------------------------------------------
+// 설명: 테이블이 매 바마다 재생성되어 성능 저하
+// 원인: var 키워드 미사용
+// 증상: 깜빡임, 느린 렌더링
+
+// [오류 코드]
+f_VIS_003_ERROR() =>
+    t = table.new(position.top_right, 2, 2)  // 매 바마다 새 테이블 생성!
+    table.cell(t, 0, 0, "Price")
+    table.cell(t, 0, 1, str.tostring(close))
+    t
+
+// [해결책]
+f_VIS_003_FIX() =>
+    var t = table.new(position.top_right, 2, 2, bgcolor=color.black)  // 한 번만 생성
+    
+    if barstate.islast
+        table.cell(t, 0, 0, "Price", text_color=color.white)
+        table.cell(t, 0, 1, str.tostring(close), text_color=color.green)
+    t
+
+
+// ============================================================================
+// 섹션 11: v6 신규 기능 관련 오류 (V6 SPECIFIC ERRORS)
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// [MTF-V6-001] 메서드 오버로딩 오류
+// ---------------------------------------------------------------------------
+// 설명: v6 UDT 메서드 정의 시 오버로딩 규칙 위반
+// 원인: 잘못된 메서드 시그니처
+// 증상: 컴파일 오류
+
+// [올바른 사용법]
+type MyType
+    float value
+    string name
+
+method init(MyType this, float v, string n) =>
+    this.value := v
+    this.name := n
+    this
+
+// ---------------------------------------------------------------------------
+// [MTF-V6-002] 맵(Map) 사용 오류
+// ---------------------------------------------------------------------------
+// 설명: v6 맵 자료구조 사용 시 발생하는 오류
+// 원인: 키 타입 제한, 크기 제한 미인지
+// 증상: 런타임 오류
+
+f_V6_002_FIX() =>
+    // 맵 생성 및 사용
+    var m = map.new<string, float>()
+    
+    // 키 존재 확인 후 접근
+    key = "price"
+    if map.contains(m, key)
+        value = map.get(m, key)
+    else
+        map.put(m, key, close)
+    
+    // 크기 관리 (최대 50,000 요소)
+    if map.size(m) > 1000
+        map.clear(m)
+    
+    map.size(m)
+
+// ---------------------------------------------------------------------------
+// [MTF-V6-003] polyline 객체 오류
+// ---------------------------------------------------------------------------
+// 설명: v6 polyline 사용 시 포인트 제한 초과
+// 원인: 최대 10,000 포인트 제한
+// 증상: 런타임 오류 또는 불완전한 렌더링
+
+f_V6_003_FIX() =>
+    var points = array.new<chart.point>()
+    
+    // 포인트 수 제한
+    if array.size(points) > 9000
+        array.shift(points)
+    
+    if bar_index % 10 == 0  // 10바마다 포인트 추가
+        array.push(points, chart.point.now(close))
+    
+    array.size(points)
+
+
+// ============================================================================
+// 유틸리티 함수: 오류 검증 도구
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// 리페인팅 감지 함수
+// ---------------------------------------------------------------------------
+f_detect_repainting(src, length) =>
+    historical_value = ta.valuewhen(barstate.ishistory, src, 0)
+    realtime_value = ta.valuewhen(barstate.isrealtime, src, 0)
+    potential_repaint = historical_value != realtime_value
+    potential_repaint
+
+// ---------------------------------------------------------------------------
+// MTF 데이터 유효성 검증 함수
+// ---------------------------------------------------------------------------
+f_validate_mtf_data(mtf_value, min_bars) =>
+    is_valid = not na(mtf_value) and bar_index >= min_bars
+    is_valid
+
+// ---------------------------------------------------------------------------
+// 타임 프레임 비율 계산 함수
+// ---------------------------------------------------------------------------
+f_get_tf_ratio(htf) =>
+    htf_seconds = timeframe.in_seconds(htf)
+    current_seconds = timeframe.in_seconds(timeframe.period)
+    ratio = htf_seconds / current_seconds
+    ratio
+
+// ---------------------------------------------------------------------------
+// 안전한 request.security 래퍼 함수
+// ---------------------------------------------------------------------------
+f_safe_security(sym, tf, expr) =>
+    result = request.security(sym, tf, expr[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+    nz(result)
+
+
+// ============================================================================
+// 메인 실행부: 오류 검증 대시보드
+// ============================================================================
+
+// 설정
+show_dashboard = input.bool(true, "Show Error Dashboard")
+htf_input = input.timeframe("60", "Higher Timeframe")
+
+// MTF 데이터 요청 (올바른 방법)
+[htf_close, htf_high, htf_low] = request.security(
+    syminfo.tickerid, 
+    htf_input, 
+    [close[1], high[1], low[1]], 
+    gaps=barmerge.gaps_off,
+    lookahead=barmerge.lookahead_on
+)
+
+// 유효성 검증
+tf_ratio = f_get_tf_ratio(htf_input)
+is_valid_tf = tf_ratio >= 1 and tf_ratio <= 1440
+is_data_valid = f_validate_mtf_data(htf_close, 100)
+
+// 대시보드 표시
+var dashboard = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80))
+
+if show_dashboard and barstate.islast
+    table.cell(dashboard, 0, 0, "MTF Error Check", text_color=color.white, text_size=size.normal)
+    table.cell(dashboard, 1, 0, "Status", text_color=color.white, text_size=size.normal)
+    
+    table.cell(dashboard, 0, 1, "TF Ratio", text_color=color.gray)
+    table.cell(dashboard, 1, 1, str.tostring(tf_ratio, "#.#") + ":1", 
+               text_color=is_valid_tf ? color.green : color.red)
+    
+    table.cell(dashboard, 0, 2, "Data Valid", text_color=color.gray)
+    table.cell(dashboard, 1, 2, is_data_valid ? "Yes" : "No", 
+               text_color=is_data_valid ? color.green : color.red)
+    
+    table.cell(dashboard, 0, 3, "HTF Close", text_color=color.gray)
+    table.cell(dashboard, 1, 3, str.tostring(htf_close, "#.##"), text_color=color.white)
+    
+    table.cell(dashboard, 0, 4, "Repainting Risk", text_color=color.gray)
+    table.cell(dashboard, 1, 4, "Low (Protected)", text_color=color.green)
+    
+    table.cell(dashboard, 0, 5, "Version", text_color=color.gray)
+    table.cell(dashboard, 1, 5, "Pine v6", text_color=color.blue)
+
+// 플롯
+plot(htf_close, "HTF Close", color=color.new(color.blue, 0), linewidth=2)
+plot(htf_high, "HTF High", color=color.new(color.green, 50))
+plot(htf_low, "HTF Low", color=color.new(color.red, 50))
